@@ -52,7 +52,12 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
   onQueueMove,
   onCubeStateChange,
 }) => {
-  const gltf = useLoader(GLTFLoader, "/models/Rubiks_Cube.glb");
+  const modelPath =
+    process.env.NODE_ENV === "production"
+      ? "/Rubiks-Cube/models/Rubiks_Cube.glb"
+      : "/models/Rubiks_Cube.glb";
+
+  const gltf = useLoader(GLTFLoader, modelPath);
   const { camera, size } = useThree();
 
   const rootGroupRef = useRef<THREE.Group>(null);
