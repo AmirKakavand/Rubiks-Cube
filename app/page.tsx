@@ -262,7 +262,7 @@ export default function Home() {
       <header className="pointer-events-none absolute top-0 left-0 right-0 z-10 flex items-start justify-between gap-2 p-4 sm:items-center sm:p-6">
         <div>
           <h1 className="text-lg font-bold tracking-tight text-white sm:text-xl">
-            Rubik's Cube 3D
+            Rubik&apos;s Cube 3D
           </h1>
           <p className="hidden text-xs text-slate-400 sm:block">
             Drag any face to twist • Drag background to orbit • Keys: U D L R F B
