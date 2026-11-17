@@ -21,6 +21,8 @@ interface RubiksCubeProps {
   onMoveComplete: (completedMove: Move) => void;
   onQueueMove: (move: Move) => void;
   onCubeStateChange: (isSolved: boolean) => void;
+  onSnapFeedback?: (isScrambleMove: boolean) => void;
+  isScrambling?: boolean;
 }
 
 interface CubeletRecord {
@@ -46,11 +48,24 @@ export function moveToNotation(axis: Axis, layer: -1 | 0 | 1, dir: 1 | -1): stri
   return `${axis.toUpperCase()}${layer}${dir > 0 ? "+" : "-"}`;
 }
 
+/**
+ * Tactile magnetic-detent easing curve:
+ * Accelerates briskly, slightly overshoots 1.0 (~4%), and snaps back firmly into place.
+ */
+function tactileSnapEase(t: number): number {
+  if (t >= 1) return 1;
+  const c1 = 1.45;
+  const c3 = c1 + 1;
+  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+}
+
 const RubiksCube: React.FC<RubiksCubeProps> = ({
   moveQueue,
   onMoveComplete,
   onQueueMove,
   onCubeStateChange,
+  onSnapFeedback,
+  isScrambling = false,
 }) => {
   const modelPath =
     process.env.NODE_ENV === "production"
@@ -66,8 +81,9 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
 
   const cubeletsRef = useRef<CubeletRecord[]>([]);
   const [ready, setReady] = useState(false);
+  const hasFramedCameraRef = useRef(false);
 
-  // Sync moveQueue and callbacks via refs so useFrame always reads latest state
+  // Sync props into refs for 60fps access without stale closures
   const moveQueueRef = useRef<Move[]>(moveQueue);
   moveQueueRef.current = moveQueue;
 
@@ -80,12 +96,23 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
   const onCubeStateChangeRef = useRef(onCubeStateChange);
   onCubeStateChangeRef.current = onCubeStateChange;
 
+  const onSnapFeedbackRef = useRef(onSnapFeedback);
+  onSnapFeedbackRef.current = onSnapFeedback;
+
+  const isScramblingRef = useRef(isScrambling);
+  isScramblingRef.current = isScrambling;
+
+  // Synchronous gesture lock + cooldown to prevent double-rotations on fast touchscreens
+  const gestureLockRef = useRef(false);
+  const lastMoveTimestampRef = useRef(0);
+
   // Active animation state
   const activeAnimRef = useRef<{
     move: Move;
     progress: number;
     targetAngle: number;
     selected: CubeletRecord[];
+    snapTriggered: boolean;
   } | null>(null);
 
   // Screen-space + 3D pointer drag state
@@ -97,6 +124,20 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
     gridPos: THREE.Vector3;
     hitPoint: THREE.Vector3;
   } | null>(null);
+
+  // Automatically frame camera distance based on viewport aspect ratio (fixes huge mobile zoom)
+  useEffect(() => {
+    if (hasFramedCameraRef.current) return;
+    const aspect = size.width / Math.max(1, size.height);
+    // Base direction from origin
+    const baseDir = new THREE.Vector3(5.6, 4.8, 6.4).normalize();
+    // On narrow portrait screens (aspect ~0.46), pull camera back so horizontal FOV comfortably fits the cube
+    const distance = aspect < 1 ? THREE.MathUtils.clamp(8.6 / Math.pow(aspect, 0.65), 10.5, 16.5) : 9.6;
+    camera.position.copy(baseDir.multiplyScalar(distance));
+    camera.lookAt(0, 0, 0);
+    camera.updateProjectionMatrix();
+    hasFramedCameraRef.current = true;
+  }, [size.width, size.height, camera]);
 
   // Initialize and normalize the loaded GLB model on mount
   useEffect(() => {
@@ -164,12 +205,10 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
     onCubeStateChangeRef.current(true);
   }, [gltf]);
 
-  // Global pointerup/pointercancel safety net so drag state can never get stuck
+  // Global pointerup/pointercancel safety net
   useEffect(() => {
     const handleGlobalPointerUp = () => {
-      if (dragStateRef.current) {
-        dragStateRef.current = null;
-      }
+      dragStateRef.current = null;
       if (orbitRef.current) {
         orbitRef.current.enabled = true;
       }
@@ -187,6 +226,8 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.repeat) return; // Prevent holding key from firing double turns
+
       const key = e.key.toUpperCase();
       const inv = e.shiftKey ? -1 : 1;
 
@@ -230,7 +271,7 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
     return true;
   }, []);
 
-  // 60fps animation loop
+  // 60fps animation loop with tactile magnetic detent snap
   useFrame((_, delta) => {
     if (!ready || !rootGroupRef.current || !pivotGroupRef.current) return;
 
@@ -254,17 +295,29 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
         progress: 0,
         targetAngle: (Math.PI / 2) * nextMove.dir,
         selected,
+        snapTriggered: false,
       };
     }
 
     const anim = activeAnimRef.current;
     if (anim) {
-      const speed = queue.length > 2 ? 12 : 7.2;
+      const isFastScramble = queue.length > 2;
+      const speed = isFastScramble ? 12.5 : 6.4;
       anim.progress = Math.min(1, anim.progress + delta * speed);
 
-      const eased = 1 - Math.pow(1 - anim.progress, 3);
+      // Use snappy overshoot curve on user turns, smooth ease-out during rapid scramble
+      const eased = isFastScramble
+        ? 1 - Math.pow(1 - anim.progress, 3)
+        : tactileSnapEase(anim.progress);
+
       pivotGroupRef.current.rotation[anim.move.axis] = anim.targetAngle * eased;
       pivotGroupRef.current.updateMatrixWorld(true);
+
+      // Trigger haptic + mechanical click right as the slice crosses the 90-degree detent (~82%)
+      if (!anim.snapTriggered && anim.progress >= 0.82) {
+        anim.snapTriggered = true;
+        onSnapFeedbackRef.current?.(isScramblingRef.current);
+      }
 
       if (anim.progress >= 1) {
         pivotGroupRef.current.rotation[anim.move.axis] = anim.targetAngle;
@@ -296,6 +349,8 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
         pivotGroupRef.current.rotation.set(0, 0, 0);
         const completed = anim.move;
         activeAnimRef.current = null;
+        gestureLockRef.current = false;
+        lastMoveTimestampRef.current = performance.now();
 
         onCubeStateChangeRef.current(checkIfSolved());
         onMoveCompleteRef.current(completed);
@@ -315,7 +370,10 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
 
   // Start touch/mouse drag on a cube face
   const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
-    if (activeAnimRef.current || moveQueueRef.current.length > 0) return;
+    // Ignore secondary touches (pinch-to-zoom) or locked animations
+    if (!e.isPrimary) return;
+    if (gestureLockRef.current || activeAnimRef.current || moveQueueRef.current.length > 0) return;
+    if (performance.now() - lastMoveTimestampRef.current < 120) return;
     if (!e.face) return;
 
     e.stopPropagation();
@@ -357,10 +415,11 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
     }
   };
 
-  // Screen-space swipe matching
+  // Screen-space swipe matching with synchronous lock so one swipe never queues twice
   const handlePointerMove = (e: ThreeEvent<PointerEvent>) => {
     const drag = dragStateRef.current;
     if (!drag || !drag.active || e.pointerId !== drag.pointerId) return;
+    if (gestureLockRef.current) return;
 
     e.stopPropagation();
 
@@ -369,7 +428,12 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
       e.clientY - drag.startScreen.y
     );
 
-    if (screenDelta.length() < 18) return;
+    if (screenDelta.length() < 22) return;
+
+    // Immediately lock gesture synchronously before React renders
+    gestureLockRef.current = true;
+    dragStateRef.current = null;
+    if (orbitRef.current) orbitRef.current.enabled = true;
 
     const swipeNorm = screenDelta.clone().normalize();
 
@@ -397,7 +461,10 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
 
     const swipeDir3D = AXES_VECTORS[bestAxis].clone().multiplyScalar(bestSign);
     const rotAxisVec = new THREE.Vector3().crossVectors(drag.normal, swipeDir3D);
-    if (rotAxisVec.lengthSq() < 0.5) return;
+    if (rotAxisVec.lengthSq() < 0.5) {
+      gestureLockRef.current = false;
+      return;
+    }
 
     let rotAxis: Axis = "y";
     let rotDir: 1 | -1 = 1;
@@ -415,9 +482,6 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
 
     const layer = THREE.MathUtils.clamp(Math.round(drag.gridPos[rotAxis]), -1, 1) as -1 | 0 | 1;
 
-    dragStateRef.current = null;
-    if (orbitRef.current) orbitRef.current.enabled = true;
-
     onQueueMoveRef.current({
       axis: rotAxis,
       layer,
@@ -427,9 +491,7 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
   };
 
   const releaseDrag = () => {
-    if (dragStateRef.current) {
-      dragStateRef.current = null;
-    }
+    dragStateRef.current = null;
     if (orbitRef.current) {
       orbitRef.current.enabled = true;
     }
@@ -452,8 +514,8 @@ const RubiksCube: React.FC<RubiksCubeProps> = ({
       <OrbitControls
         ref={orbitRef}
         enablePan={false}
-        minDistance={isPortrait ? 6.5 : 5.2}
-        maxDistance={isPortrait ? 15 : 13}
+        minDistance={isPortrait ? 7.5 : 5.5}
+        maxDistance={isPortrait ? 18 : 14}
         dampingFactor={0.08}
         enableDamping
         rotateSpeed={0.85}

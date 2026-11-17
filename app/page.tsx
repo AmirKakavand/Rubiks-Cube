@@ -12,6 +12,7 @@ export default function Home() {
   const [hasScrambled, setHasScrambled] = useState(false);
   const [isScrambling, setIsScrambling] = useState(false);
   const [cubeInstanceKey, setCubeInstanceKey] = useState(0);
+  const [soundEnabled, setSoundEnabled] = useState(true);
 
   // Deterministic refs for animation & timer lifecycle
   const scrambleRemainingRef = useRef(0);
@@ -19,6 +20,11 @@ export default function Home() {
   const timerRunningRef = useRef(false);
   const timerStartRef = useRef<number | null>(null);
   const playerMovedRef = useRef(false);
+  const soundEnabledRef = useRef(soundEnabled);
+  soundEnabledRef.current = soundEnabled;
+
+  // Reusable Web Audio context for crisp plastic click feedback
+  const audioCtxRef = useRef<AudioContext | null>(null);
 
   // Speedrun timer state
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -35,6 +41,57 @@ export default function Home() {
 
     return () => clearInterval(interval);
   }, [timerRunning]);
+
+  // Synthesize a subtle tactile plastic click + trigger mobile haptic pulse
+  const triggerSnapFeedback = useCallback((duringScramble: boolean) => {
+    // Haptic feedback on mobile devices (light crisp pulse on user turns, subtle tick on scramble)
+    if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+      try {
+        navigator.vibrate(duringScramble ? 6 : 15);
+      } catch {
+        // Ignore on unsupported browsers
+      }
+    }
+
+    if (!soundEnabledRef.current || typeof window === "undefined") return;
+
+    try {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new AudioCtx();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === "suspended") {
+        ctx.resume();
+      }
+
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      // Short percussive plastic snap
+      osc.type = "triangle";
+      const baseFreq = duringScramble ? 290 + Math.random() * 60 : 240 + Math.random() * 40;
+      osc.frequency.setValueAtTime(baseFreq, now);
+      osc.frequency.exponentialRampToValueAtTime(75, now + 0.038);
+
+      const peakGain = duringScramble ? 0.05 : 0.14;
+      gain.gain.setValueAtTime(peakGain, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.042);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(now);
+      osc.stop(now + 0.045);
+    } catch {
+      // Ignore audio errors if blocked before user interaction
+    }
+  }, []);
 
   const startTimerIfNeeded = useCallback(() => {
     if (!timerRunningRef.current) {
@@ -87,6 +144,14 @@ export default function Home() {
 
       if (solved && scrambleRemainingRef.current === 0 && playerMovedRef.current) {
         stopTimer();
+        // Celebratory double haptic pulse on solve
+        if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+          try {
+            navigator.vibrate([25, 50, 40]);
+          } catch {
+            // Ignore
+          }
+        }
       }
     },
     [stopTimer]
@@ -197,7 +262,7 @@ export default function Home() {
       <header className="pointer-events-none absolute top-0 left-0 right-0 z-10 flex items-start justify-between gap-2 p-4 sm:items-center sm:p-6">
         <div>
           <h1 className="text-lg font-bold tracking-tight text-white sm:text-xl">
-            Rubik&apos;s Cube 3D
+            Rubik's Cube 3D
           </h1>
           <p className="hidden text-xs text-slate-400 sm:block">
             Drag any face to twist • Drag background to orbit • Keys: U D L R F B
@@ -207,23 +272,48 @@ export default function Home() {
           </p>
         </div>
 
-        {/* Timer & Move Counter */}
-        <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-slate-900/70 px-3.5 py-2 backdrop-blur-md shadow-xl sm:gap-4 sm:px-5 sm:py-2.5">
-          <div className="text-right">
-            <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400 sm:text-[10px]">
-              Time
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Sound Toggle */}
+          <button
+            type="button"
+            onClick={() => setSoundEnabled((s) => !s)}
+            aria-label={soundEnabled ? "Mute sound" : "Unmute sound"}
+            title={soundEnabled ? "Mute click sounds" : "Enable click sounds"}
+            className="pointer-events-auto flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-slate-900/70 text-slate-300 backdrop-blur-md shadow-xl transition hover:bg-white/10 hover:text-white active:scale-95 sm:h-11 sm:w-11 cursor-pointer"
+          >
+            {soundEnabled ? (
+              <svg className="h-4 w-4 sm:h-5 sm:w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M11 5L6 9H2v6h4l5 4V5z" />
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+              </svg>
+            ) : (
+              <svg className="h-4 w-4 sm:h-5 sm:w-5 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M11 5L6 9H2v6h4l5 4V5z" />
+                <line x1="23" y1="9" x2="17" y2="15" />
+                <line x1="17" y1="9" x2="23" y2="15" />
+              </svg>
+            )}
+          </button>
+
+          {/* Timer & Move Counter */}
+          <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-slate-900/70 px-3.5 py-2 backdrop-blur-md shadow-xl sm:gap-4 sm:px-5 sm:py-2.5">
+            <div className="text-right">
+              <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400 sm:text-[10px]">
+                Time
+              </div>
+              <div className="font-mono text-base font-bold tabular-nums text-sky-400 sm:text-lg">
+                {formatTime(elapsedMs)}
+              </div>
             </div>
-            <div className="font-mono text-base font-bold tabular-nums text-sky-400 sm:text-lg">
-              {formatTime(elapsedMs)}
-            </div>
-          </div>
-          <div className="h-6 w-px bg-white/10 sm:h-7" />
-          <div className="text-right">
-            <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400 sm:text-[10px]">
-              Moves
-            </div>
-            <div className="font-mono text-base font-bold tabular-nums text-white sm:text-lg">
-              {moveHistory.length}
+            <div className="h-6 w-px bg-white/10 sm:h-7" />
+            <div className="text-right">
+              <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400 sm:text-[10px]">
+                Moves
+              </div>
+              <div className="font-mono text-base font-bold tabular-nums text-white sm:text-lg">
+                {moveHistory.length}
+              </div>
             </div>
           </div>
         </div>
@@ -263,6 +353,8 @@ export default function Home() {
             onMoveComplete={handleMoveComplete}
             onQueueMove={queueMove}
             onCubeStateChange={handleCubeStateChange}
+            onSnapFeedback={triggerSnapFeedback}
+            isScrambling={isScrambling}
           />
         </Suspense>
 
